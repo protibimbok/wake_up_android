@@ -1,8 +1,13 @@
 package io.github.protibimbok.wake_up_android
 
+import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -16,10 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import io.github.protibimbok.wake_up_android.ui.theme.WakeUPTheme
-import android.os.PowerManager
-import android.provider.Settings
-import android.net.Uri
-
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -37,6 +39,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // ask user to ignore battery optimizations if needed
         val pm = getSystemService(PowerManager::class.java)
         if (!pm.isIgnoringBatteryOptimizations(packageName)) {
             startActivity(
@@ -46,25 +49,44 @@ class MainActivity : ComponentActivity() {
                 }
             )
         }
-
     }
+}
+
+/**
+ * Check via ActivityManager whether a given service class is running
+ */
+fun Context.isServiceRunning(serviceClass: Class<*>): Boolean {
+    val mgr = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+    @Suppress("DEPRECATION")
+    return mgr
+        .getRunningServices(Int.MAX_VALUE)
+        .any { it.service.className == serviceClass.name }
 }
 
 @Composable
 fun ServiceManagerScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
 
-    // remember the toggle state locally
-    var isShakeServiceRunning by rememberSaveable { mutableStateOf(false) }
+    var isShakeServiceRunning by rememberSaveable {
+        mutableStateOf(context.isServiceRunning(ShakeService::class.java))
+    }
+
+    // poll every second for external changes
+    LaunchedEffect(Unit) {
+        while (true) {
+            val running = context.isServiceRunning(ShakeService::class.java)
+            if (running != isShakeServiceRunning) {
+                isShakeServiceRunning = running
+            }
+            delay(1000L)
+        }
+    }
 
     Column(
         modifier = modifier.padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // ——————————————————————————————————————
-        //  Card #1: Shake‑to‑Wake Service Toggle
-        // ——————————————————————————————————————
         Card(
             modifier = Modifier.fillMaxWidth(),
             elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
@@ -89,7 +111,10 @@ fun ServiceManagerScreen(modifier: Modifier = Modifier) {
                 Switch(
                     checked = isShakeServiceRunning,
                     onCheckedChange = { enabled ->
+                        // update UI immediately
                         isShakeServiceRunning = enabled
+
+                        // start or stop the service
                         val svcIntent = Intent(context, ShakeService::class.java)
                         if (enabled) {
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
