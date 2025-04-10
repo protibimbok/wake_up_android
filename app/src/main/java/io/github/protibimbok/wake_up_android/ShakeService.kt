@@ -6,8 +6,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -22,6 +24,8 @@ import androidx.core.app.NotificationCompat
 class ShakeService : Service(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
     private var accelSensor: Sensor? = null
+    private lateinit var powerManager: PowerManager
+    private var screenStateReceiver: BroadcastReceiver? = null
 
     // shake detection parameters
     private var lastShakeTime = 0L
@@ -31,6 +35,7 @@ class ShakeService : Service(), SensorEventListener {
     override fun onCreate() {
         super.onCreate()
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
 
         // pick a wake‑up accelerometer if available
         val allAccels = sensorManager.getSensorList(Sensor.TYPE_ACCELEROMETER)
@@ -43,17 +48,48 @@ class ShakeService : Service(), SensorEventListener {
             return
         }
 
+        // Register screen state receiver
+        screenStateReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    Intent.ACTION_SCREEN_OFF -> {
+                        Log.d("ShakeService", "Screen off, starting sensor listener")
+                        sensorManager.registerListener(
+                            this@ShakeService,
+                            accelSensor,
+                            SensorManager.SENSOR_DELAY_NORMAL
+                        )
+                    }
+                    Intent.ACTION_SCREEN_ON -> {
+                        Log.d("ShakeService", "Screen on, stopping sensor listener")
+                        sensorManager.unregisterListener(this@ShakeService)
+                    }
+                }
+            }
+        }
+
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+        }
+        registerReceiver(screenStateReceiver, filter)
+
         // run in foreground so service stays alive with screen off
         startForeground(1, buildNotification())
-        sensorManager.registerListener(
-            this,
-            accelSensor,
-            SensorManager.SENSOR_DELAY_NORMAL
-        )
+
+        // Start listening if screen is already off
+        if (!powerManager.isInteractive) {
+            sensorManager.registerListener(
+                this,
+                accelSensor,
+                SensorManager.SENSOR_DELAY_NORMAL
+            )
+        }
     }
 
     override fun onDestroy() {
         sensorManager.unregisterListener(this)
+        screenStateReceiver?.let { unregisterReceiver(it) }
         super.onDestroy()
     }
 
