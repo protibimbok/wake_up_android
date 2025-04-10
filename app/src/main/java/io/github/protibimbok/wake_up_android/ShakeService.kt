@@ -20,6 +20,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import kotlin.math.sqrt
 
 class ShakeService : Service(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
@@ -27,10 +28,23 @@ class ShakeService : Service(), SensorEventListener {
     private lateinit var powerManager: PowerManager
     private var screenStateReceiver: BroadcastReceiver? = null
 
+    // wake up call
+    private var isWakingUp = false
+
     // shake detection parameters
-    private var lastShakeTime = 0L
-    private val shakeThreshold = 12f  // m/s²
-    private val shakeIntervalMs = 1000L
+    private var lastTimestamp: Long = 0L
+    private var lastShakeTime: Long = 0L
+    private var lastPeakTime: Long = 0L
+    private var lastAccel: Float = 0f
+    private var peakCount: Int = 0
+
+    // Constants for shake detection
+    private val SHAKE_THRESHOLD = 10f // m/s²
+    private val MIN_TIME_BETWEEN_SHAKES = 150L // milliseconds
+    private val MAX_TIME_BETWEEN_PEAKS = 500L // milliseconds
+    private val REQUIRED_PEAKS = 4 // number of direction changes needed
+    
+
 
     override fun onCreate() {
         super.onCreate()
@@ -38,9 +52,8 @@ class ShakeService : Service(), SensorEventListener {
         powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
 
         // pick a wake‑up accelerometer if available
-        val allAccels = sensorManager.getSensorList(Sensor.TYPE_ACCELEROMETER)
-        accelSensor = allAccels.firstOrNull { it.isWakeUpSensor }
-            ?: allAccels.firstOrNull()
+        // val allAccels = sensorManager.getSensorList(Sensor.TYPE_ACCELEROMETER)
+        accelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
 
         if (accelSensor == null) {
             Log.w("ShakeService", "No accelerometer available")
@@ -57,12 +70,14 @@ class ShakeService : Service(), SensorEventListener {
                         sensorManager.registerListener(
                             this@ShakeService,
                             accelSensor,
-                            SensorManager.SENSOR_DELAY_NORMAL
+                            SensorManager.SENSOR_DELAY_GAME
                         )
+                        isWakingUp = false
                     }
                     Intent.ACTION_SCREEN_ON -> {
                         Log.d("ShakeService", "Screen on, stopping sensor listener")
                         sensorManager.unregisterListener(this@ShakeService)
+                        isWakingUp = false
                     }
                 }
             }
@@ -82,9 +97,10 @@ class ShakeService : Service(), SensorEventListener {
             sensorManager.registerListener(
                 this,
                 accelSensor,
-                SensorManager.SENSOR_DELAY_NORMAL
+                SensorManager.SENSOR_DELAY_GAME
             )
         }
+
     }
 
     override fun onDestroy() {
@@ -95,18 +111,52 @@ class ShakeService : Service(), SensorEventListener {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+
+
     override fun onSensorChanged(event: SensorEvent) {
+        if (event.sensor.type != Sensor.TYPE_LINEAR_ACCELERATION || isWakingUp) return
+
+        val now = event.timestamp
+        val nowMillis = System.currentTimeMillis()
+        
+        if (lastTimestamp == 0L) {
+            lastTimestamp = now
+            return
+        }
+
+        // Calculate total acceleration
         val x = event.values[0]
         val y = event.values[1]
         val z = event.values[2]
-        val g = Math.sqrt((x*x + y*y + z*z).toDouble()).toFloat()
-        val now = System.currentTimeMillis()
+        val accel = sqrt(x * x + y * y + z * z)
 
-        if (g > shakeThreshold && now - lastShakeTime > shakeIntervalMs) {
-            lastShakeTime = now
-            Log.d("ShakeService", "Shake detected, waking device")
-            wakeUpDevice()
+        // Detect peak (direction change)
+        if (accel > SHAKE_THRESHOLD) {
+            val timeSinceLastPeak = nowMillis - lastPeakTime
+            
+            // Check if this is a new peak within time window
+            if (timeSinceLastPeak > MIN_TIME_BETWEEN_SHAKES) {
+                if (timeSinceLastPeak < MAX_TIME_BETWEEN_PEAKS) {
+                    peakCount++
+                    Log.d("ShakeService", "Peak detected: $peakCount")
+                    
+                    // Check if we've detected enough peaks for a shake
+                    if (peakCount >= REQUIRED_PEAKS) {
+                        if (!isWakingUp) {
+                            isWakingUp = true
+                            wakeUpDevice()
+                        }
+                    }
+                } else {
+                    // Too much time passed, reset counter
+                    peakCount = 1
+                }
+                lastPeakTime = nowMillis
+            }
         }
+
+        lastAccel = accel
+        lastTimestamp = now
     }
 
     override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {
