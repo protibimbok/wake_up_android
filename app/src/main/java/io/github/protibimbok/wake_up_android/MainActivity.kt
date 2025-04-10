@@ -23,6 +23,8 @@ import androidx.compose.ui.unit.dp
 import io.github.protibimbok.wake_up_android.ui.theme.WakeUPTheme
 import kotlinx.coroutines.delay
 
+import io.github.protibimbok.wake_up_android.Settings as SettingsStore
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,6 +73,11 @@ fun ServiceManagerScreen(modifier: Modifier = Modifier) {
         mutableStateOf(context.isServiceRunning(ShakeService::class.java))
     }
 
+    // Track available wake sensors and their states
+    var availableSensors by remember {
+        mutableStateOf(SettingsStore.getAvailableWakeSensors(context))
+    }
+
     // poll every second for external changes
     LaunchedEffect(Unit) {
         while (true) {
@@ -91,42 +98,109 @@ fun ServiceManagerScreen(modifier: Modifier = Modifier) {
             modifier = Modifier.fillMaxWidth(),
             elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
         ) {
-            Row(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                    .padding(16.dp)
             ) {
-                Column {
-                    Text(
-                        text = "Shake to Wake Service",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Text(
-                        text = if (isShakeServiceRunning) "Running" else "Stopped",
-                        style = MaterialTheme.typography.bodySmall
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column {
+                        Text(
+                            text = "Motion Detection Service",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            text = if (isShakeServiceRunning) "Running" else "Stopped",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Switch(
+                        checked = isShakeServiceRunning,
+                        onCheckedChange = { enabled ->
+                            isShakeServiceRunning = enabled
+                            val svcIntent = Intent(context, ShakeService::class.java)
+                            
+                            if (enabled) {
+                                // Pass enabled sensors to service
+                                val activeConfigs = availableSensors.filter { it.enabled }
+                                svcIntent.putParcelableArrayListExtra(
+                                    "sensors",
+                                    ArrayList(activeConfigs)
+                                )
+                                
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                    context.startForegroundService(svcIntent)
+                                } else {
+                                    context.startService(svcIntent)
+                                }
+                            } else {
+                                context.stopService(svcIntent)
+                            }
+                        }
                     )
                 }
-                Switch(
-                    checked = isShakeServiceRunning,
-                    onCheckedChange = { enabled ->
-                        // update UI immediately
-                        isShakeServiceRunning = enabled
 
-                        // start or stop the service
-                        val svcIntent = Intent(context, ShakeService::class.java)
-                        if (enabled) {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                context.startForegroundService(svcIntent)
-                            } else {
-                                context.startService(svcIntent)
-                            }
-                        } else {
-                            context.stopService(svcIntent)
+                if (availableSensors.isEmpty()) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "No wake-capable motion sensors found",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                } else {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    Text(
+                        text = "Available Wake Sensors",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    availableSensors.forEachIndexed { index, sensor ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = sensor.name,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Switch(
+                                checked = sensor.enabled,
+                                onCheckedChange = { enabled ->
+                                    availableSensors = availableSensors.toMutableList().apply {
+                                        this[index] = sensor.copy(enabled = enabled)
+                                    }
+                                    
+                                    // Save settings
+                                    SettingsStore.updateEnabledSensors(context, availableSensors)
+                                    
+                                    // Update service if running
+                                    if (isShakeServiceRunning) {
+                                        val svcIntent = Intent(context, ShakeService::class.java)
+                                        svcIntent.putParcelableArrayListExtra(
+                                            "sensors",
+                                            ArrayList(availableSensors.filter { it.enabled })
+                                        )
+                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                            context.startForegroundService(svcIntent)
+                                        } else {
+                                            context.startService(svcIntent)
+                                        }
+                                    }
+                                }
+                            )
                         }
                     }
-                )
+                }
             }
         }
     }

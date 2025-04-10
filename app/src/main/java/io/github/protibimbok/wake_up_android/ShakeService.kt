@@ -26,25 +26,29 @@ import kotlin.math.sqrt
 
 class ShakeService : Service(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
-    private var motionSensor: Sensor? = null
     private lateinit var powerManager: PowerManager
     private var screenStateReceiver: BroadcastReceiver? = null
+    
+    // Active sensors and their configurations
+    private val activeSensors = mutableMapOf<Int, Pair<Sensor, SensorConfig>>()
     private var isListenerRegistered = false
-    private var useSigMotion = false
-
+    
     // wake‑up flag
     private var isWakingUp = false
 
-    // shake‑detection state
-    private var lastPeakTime: Long = 0L
-    private var peakCount: Int = 0
-    private var lastPeakX = 0f
-    private var lastPeakY = 0f
-    private var lastPeakZ = 0f
-    private var haveLastPeak = false
+    // Motion detection state
+    private val sensorStates = mutableMapOf<Int, SensorState>()
+    
+    data class SensorState(
+        var lastPeakTime: Long = 0L,
+        var peakCount: Int = 0,
+        var lastPeakX: Float = 0f,
+        var lastPeakY: Float = 0f,
+        var lastPeakZ: Float = 0f,
+        var haveLastPeak: Boolean = false
+    )
 
-    // shake thresholds
-    private val SHAKE_THRESHOLD = 10f
+    // Detection thresholds
     private val MIN_TIME_BETWEEN_SHAKES = 150L
     private val MAX_TIME_BETWEEN_PEAKS = 500L
     private val REQUIRED_PEAKS = 4
@@ -52,9 +56,7 @@ class ShakeService : Service(), SensorEventListener {
     // one‑shot trigger listener for significant‑motion
     private val triggerListener = object : TriggerEventListener() {
         override fun onTrigger(event: TriggerEvent) {
-            if (isWakingUp) {
-                return
-            }
+            if (isWakingUp) return
             isWakingUp = true
             Log.d("ShakeService", "Significant motion detected")
             wakeUpDevice()
@@ -67,30 +69,8 @@ class ShakeService : Service(), SensorEventListener {
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
 
-        // 1. Try to use the one‑shot wake‑up Significant Motion sensor
-        sensorManager.getDefaultSensor(
-            Sensor.TYPE_SIGNIFICANT_MOTION,
-            true
-        )?.let {
-            motionSensor = it
-            useSigMotion = true
-            Log.d("ShakeService", "Using TYPE_SIGNIFICANT_MOTION")
-        }
-
-        // 2. Fallback to a wake‑up accelerometer if necessary
-        if (motionSensor == null) {
-            motionSensor = sensorManager.getDefaultSensor(
-                Sensor.TYPE_ACCELEROMETER,
-                true   // request wake‑up variant
-            )
-            Log.d("ShakeService", "Using accelerometer sensor")
-        }
-
-        if (motionSensor == null) {
-            Log.w("ShakeService", "No suitable motion sensor found")
-            stopSelf()
-            return
-        }
+        // Initialize available sensors
+        initializeSensors()
 
         // listen for screen on/off to start/stop sensing
         screenStateReceiver = object : BroadcastReceiver() {
@@ -98,12 +78,12 @@ class ShakeService : Service(), SensorEventListener {
                 when (intent?.action) {
                     Intent.ACTION_SCREEN_OFF -> {
                         Log.d("ShakeService", "Screen off → start sensing")
-                        registerSensorListener()
+                        registerSensorListeners()
                         isWakingUp = false
                     }
                     Intent.ACTION_SCREEN_ON -> {
                         Log.d("ShakeService", "Screen on → stop sensing")
-                        unregisterSensorListener()
+                        unregisterSensorListeners()
                         isWakingUp = false
                     }
                 }
@@ -122,13 +102,32 @@ class ShakeService : Service(), SensorEventListener {
 
         // if screen already off, kick off sensing
         if (!powerManager.isInteractive) {
-            registerSensorListener()
+            registerSensorListeners()
+        }
+    }
+
+    private fun initializeSensors() {
+        activeSensors.clear()
+        sensorStates.clear()
+        
+        AvailableSensors.SUPPORTED_SENSORS.forEach { config ->
+            val sensor = sensorManager.getDefaultSensor(config.type, config.requiresWakeup)
+            if (sensor != null) {
+                activeSensors[config.type] = Pair(sensor, config)
+                sensorStates[config.type] = SensorState()
+                Log.d("ShakeService", "Added sensor: ${config.name}")
+            }
+        }
+        
+        if (activeSensors.isEmpty()) {
+            Log.w("ShakeService", "No suitable motion sensors found")
+            stopSelf()
         }
     }
 
     override fun onDestroy() {
         Log.d("ShakeService", "Service onDestroy")
-        unregisterSensorListener()
+        unregisterSensorListeners()
         screenStateReceiver?.let { unregisterReceiver(it) }
         super.onDestroy()
     }
@@ -136,6 +135,19 @@ class ShakeService : Service(), SensorEventListener {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Handle sensor configuration updates
+        intent?.getParcelableArrayListExtra<SensorConfig>("sensors")?.let { configs ->
+            configs.forEach { config ->
+                activeSensors[config.type]?.let { (sensor, _) ->
+                    activeSensors[config.type] = Pair(sensor, config)
+                }
+            }
+            // Restart sensor listeners if needed
+            if (isListenerRegistered) {
+                unregisterSensorListeners()
+                registerSensorListeners()
+            }
+        }
         return START_STICKY
     }
 
@@ -155,43 +167,68 @@ class ShakeService : Service(), SensorEventListener {
         super.onTaskRemoved(rootIntent)
     }
 
-    // only called when using accelerometer
     override fun onSensorChanged(event: SensorEvent) {
-        if (useSigMotion) return
-        if (event.sensor.type != Sensor.TYPE_ACCELEROMETER || isWakingUp) return
-
+        if (isWakingUp) return
+        
+        val sensorType = event.sensor.type
+        val (_, config) = activeSensors[sensorType] ?: return
+        if (!config.enabled) return
+        
+        val state = sensorStates[sensorType] ?: return
         val now = System.currentTimeMillis()
-        val x = event.values[0]
-        val y = event.values[1]
-        val z = event.values[2]
-        val accel = sqrt(x*x + y*y + z*z)
+        
+        when (sensorType) {
+            Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_LINEAR_ACCELERATION -> {
+                val x = event.values[0]
+                val y = event.values[1]
+                val z = event.values[2]
+                val magnitude = sqrt(x*x + y*y + z*z)
 
-        if (accel > SHAKE_THRESHOLD) {
-            val dt = now - lastPeakTime
-            if (dt > MIN_TIME_BETWEEN_SHAKES) {
-                // compute dot product with last peak vector
-                val dot = x * lastPeakX + y * lastPeakY + z * lastPeakZ
+                if (magnitude > config.threshold) {
+                    val dt = now - state.lastPeakTime
+                    if (dt > MIN_TIME_BETWEEN_SHAKES) {
+                        val dot = x * state.lastPeakX + y * state.lastPeakY + z * state.lastPeakZ
 
-                if (haveLastPeak && dot < 0f && dt < MAX_TIME_BETWEEN_PEAKS) {
-                    // opposite‑direction peak
-                    peakCount++
-                    Log.d("ShakeService", "Opposite peak #$peakCount")
+                        if (state.haveLastPeak && dot < 0f && dt < MAX_TIME_BETWEEN_PEAKS) {
+                            state.peakCount++
+                            Log.d("ShakeService", "${config.name} peak #${state.peakCount}")
 
-                    if (peakCount >= REQUIRED_PEAKS) {
-                        isWakingUp = true
-                        wakeUpDevice()
+                            if (state.peakCount >= REQUIRED_PEAKS) {
+                                isWakingUp = true
+                                wakeUpDevice()
+                            }
+                        } else {
+                            state.peakCount = 1
+                        }
+
+                        state.lastPeakTime = now
+                        state.lastPeakX = x
+                        state.lastPeakY = y
+                        state.lastPeakZ = z
+                        state.haveLastPeak = true
                     }
-                } else {
-                    // first peak or same‐direction/too‐slow → reset
-                    peakCount = 1
                 }
-
-                // record this peak for the next comparison
-                lastPeakTime = now
-                lastPeakX = x
-                lastPeakY = y
-                lastPeakZ = z
-                haveLastPeak = true
+            }
+            
+            Sensor.TYPE_GYROSCOPE -> {
+                val rotationRate = sqrt(
+                    event.values[0] * event.values[0] +
+                    event.values[1] * event.values[1] +
+                    event.values[2] * event.values[2]
+                )
+                
+                if (rotationRate > config.threshold) {
+                    val dt = now - state.lastPeakTime
+                    if (dt > MIN_TIME_BETWEEN_SHAKES) {
+                        state.peakCount++
+                        state.lastPeakTime = now
+                        
+                        if (state.peakCount >= REQUIRED_PEAKS) {
+                            isWakingUp = true
+                            wakeUpDevice()
+                        }
+                    }
+                }
             }
         }
     }
@@ -223,40 +260,63 @@ class ShakeService : Service(), SensorEventListener {
             )
         }
         return NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Shake to Wake")
-            .setContentText("Listening for shake gestures")
+            .setContentTitle("Motion Detection Service")
+            .setContentText("Monitoring for wake gestures")
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
 
-    private fun registerSensorListener() {
+    private fun registerSensorListeners() {
         try {
-            isListenerRegistered = if (useSigMotion) {
-                sensorManager.requestTriggerSensor(triggerListener, motionSensor)
-            } else {
-                sensorManager.registerListener(
-                    this,
-                    motionSensor,
-                    SensorManager.SENSOR_DELAY_GAME
-                )
+            isListenerRegistered = false
+            var anyRegistered = false
+            
+            activeSensors.forEach { (type, pair) ->
+                val (sensor, config) = pair
+                if (!config.enabled) return@forEach
+                
+                when (type) {
+                    Sensor.TYPE_SIGNIFICANT_MOTION -> {
+                        if (sensorManager.requestTriggerSensor(triggerListener, sensor)) {
+                            anyRegistered = true
+                        }
+                    }
+                    else -> {
+                        if (sensorManager.registerListener(
+                            this,
+                            sensor,
+                            SensorManager.SENSOR_DELAY_GAME
+                        )) {
+                            anyRegistered = true
+                        }
+                    }
+                }
             }
-            Log.d("ShakeService", "Listener registered: $isListenerRegistered")
+            
+            isListenerRegistered = anyRegistered
+            Log.d("ShakeService", "Sensors registered: $isListenerRegistered")
         } catch (e: Exception) {
-            Log.e("ShakeService", "Failed to register listener", e)
+            Log.e("ShakeService", "Failed to register sensors", e)
         }
     }
 
-    private fun unregisterSensorListener() {
+    private fun unregisterSensorListeners() {
         try {
-            if (useSigMotion) {
-                sensorManager.cancelTriggerSensor(triggerListener, motionSensor)
-            } else {
-                sensorManager.unregisterListener(this)
+            activeSensors.forEach { (type, pair) ->
+                val (sensor, _) = pair
+                when (type) {
+                    Sensor.TYPE_SIGNIFICANT_MOTION -> {
+                        sensorManager.cancelTriggerSensor(triggerListener, sensor)
+                    }
+                    else -> {
+                        sensorManager.unregisterListener(this, sensor)
+                    }
+                }
             }
             isListenerRegistered = false
-            Log.d("ShakeService", "Listener unregistered")
+            Log.d("ShakeService", "Sensors unregistered")
         } catch (e: Exception) {
-            Log.e("ShakeService", "Failed to unregister listener", e)
+            Log.e("ShakeService", "Failed to unregister sensors", e)
         }
     }
 }
