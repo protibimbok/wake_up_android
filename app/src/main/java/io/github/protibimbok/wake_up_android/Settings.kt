@@ -9,9 +9,20 @@ import org.json.JSONObject
 object Settings {
     private const val PREFS_NAME = "wake_up_settings"
     private const val KEY_SENSOR_CONFIGS = "sensor_configs"
+    private const val KEY_SOUND_ENABLED = "sound_enabled"
 
     private fun getPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
+
+    fun isSoundEnabled(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_SOUND_ENABLED, false)
+    }
+
+    fun setSoundEnabled(context: Context, enabled: Boolean) {
+        getPrefs(context).edit()
+            .putBoolean(KEY_SOUND_ENABLED, enabled)
+            .apply()
     }
 
     fun getAvailableWakeSensors(context: Context): List<SensorConfig> {

@@ -11,6 +11,7 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -26,6 +27,59 @@ import kotlinx.coroutines.delay
 import io.github.protibimbok.wake_up_android.Settings as SettingsStore
 
 class MainActivity : ComponentActivity() {
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            // Permission granted, start the service if needed
+            if (SettingsStore.isSoundEnabled(this)) {
+                val svcIntent = Intent(this, ShakeService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(svcIntent)
+                } else {
+                    startService(svcIntent)
+                }
+            }
+        } else {
+            // Permission denied, disable sound detection
+            SettingsStore.setSoundEnabled(this, false)
+        }
+    }
+
+    private val requestMicrophoneServiceLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            // Permission granted, start the service if needed
+            if (SettingsStore.isSoundEnabled(this)) {
+                val svcIntent = Intent(this, ShakeService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(svcIntent)
+                } else {
+                    startService(svcIntent)
+                }
+            }
+        } else {
+            // Permission denied, disable sound detection
+            SettingsStore.setSoundEnabled(this, false)
+        }
+    }
+
+    private fun requestRequiredPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // On Android 13+, we need both permissions
+            if (!SoundDetector.hasAllRequiredPermissions(this)) {
+                requestPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                requestMicrophoneServiceLauncher.launch(android.Manifest.permission.FOREGROUND_SERVICE_MICROPHONE)
+            }
+        } else {
+            // On older versions, we only need RECORD_AUDIO
+            if (!SoundDetector.hasPermission(this)) {
+                requestPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -35,7 +89,10 @@ class MainActivity : ComponentActivity() {
                     ServiceManagerScreen(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(innerPadding)
+                            .padding(innerPadding),
+                        onRequestPermission = {
+                            requestRequiredPermissions()
+                        }
                     )
                 }
             }
@@ -66,7 +123,10 @@ fun Context.isServiceRunning(serviceClass: Class<*>): Boolean {
 }
 
 @Composable
-fun ServiceManagerScreen(modifier: Modifier = Modifier) {
+fun ServiceManagerScreen(
+    modifier: Modifier = Modifier,
+    onRequestPermission: () -> Unit = {}
+) {
     val context = LocalContext.current
 
     var isShakeServiceRunning by rememberSaveable {
@@ -76,6 +136,11 @@ fun ServiceManagerScreen(modifier: Modifier = Modifier) {
     // Track available wake sensors and their states
     var availableSensors by remember {
         mutableStateOf(SettingsStore.getAvailableWakeSensors(context))
+    }
+
+    // Track sound detection state
+    var isSoundEnabled by rememberSaveable {
+        mutableStateOf(SettingsStore.isSoundEnabled(context))
     }
 
     // poll every second for external changes
@@ -212,6 +277,69 @@ fun ServiceManagerScreen(modifier: Modifier = Modifier) {
                             }
                         }
                     }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                HorizontalDivider()
+                
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = "Sound Detection",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            text = "Detect sudden loud sounds (1-3 seconds) to wake",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Switch(
+                        checked = isSoundEnabled,
+                        onCheckedChange = { enabled ->
+                            if (enabled) {
+                                // Check if we have all required permissions
+                                if (SoundDetector.hasAllRequiredPermissions(context)) {
+                                    isSoundEnabled = true
+                                    SettingsStore.setSoundEnabled(context, true)
+
+                                    // Update service if running
+                                    if (isShakeServiceRunning) {
+                                        val svcIntent = Intent(context, ShakeService::class.java)
+                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                            context.startForegroundService(svcIntent)
+                                        } else {
+                                            context.startService(svcIntent)
+                                        }
+                                    }
+                                } else {
+                                    // Request permissions
+                                    onRequestPermission()
+                                }
+                            } else {
+                                isSoundEnabled = false
+                                SettingsStore.setSoundEnabled(context, false)
+
+                                // Update service if running
+                                if (isShakeServiceRunning) {
+                                    val svcIntent = Intent(context, ShakeService::class.java)
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                        context.startForegroundService(svcIntent)
+                                    } else {
+                                        context.startService(svcIntent)
+                                    }
+                                }
+                            }
+                        }
+                    )
                 }
             }
         }
