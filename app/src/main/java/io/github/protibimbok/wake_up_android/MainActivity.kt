@@ -162,42 +162,54 @@ fun ServiceManagerScreen(modifier: Modifier = Modifier) {
                     Spacer(modifier = Modifier.height(8.dp))
 
                     availableSensors.forEachIndexed { index, sensor ->
-                        Row(
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(
-                                text = sensor.name,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Switch(
-                                checked = sensor.enabled,
-                                onCheckedChange = { enabled ->
-                                    availableSensors = availableSensors.toMutableList().apply {
-                                        this[index] = sensor.copy(enabled = enabled)
-                                    }
-                                    
-                                    // Save settings
-                                    SettingsStore.updateEnabledSensors(context, availableSensors)
-                                    
-                                    // Update service if running
-                                    if (isShakeServiceRunning) {
-                                        val svcIntent = Intent(context, ShakeService::class.java)
-                                        svcIntent.putParcelableArrayListExtra(
-                                            "sensors",
-                                            ArrayList(availableSensors.filter { it.enabled })
-                                        )
-                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                            context.startForegroundService(svcIntent)
-                                        } else {
-                                            context.startService(svcIntent)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = sensor.name,
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Switch(
+                                    checked = sensor.enabled,
+                                    onCheckedChange = { enabled ->
+                                        availableSensors = availableSensors.toMutableList().apply {
+                                            this[index] = sensor.copy(enabled = enabled)
+                                        }
+                                        
+                                        // Save settings
+                                        SettingsStore.updateEnabledSensors(context, availableSensors)
+                                        
+                                        // Update service if running
+                                        if (isShakeServiceRunning) {
+                                            val svcIntent = Intent(context, ShakeService::class.java)
+                                            svcIntent.putParcelableArrayListExtra(
+                                                "sensors",
+                                                ArrayList(availableSensors.filter { it.enabled })
+                                            )
+                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                                context.startForegroundService(svcIntent)
+                                            } else {
+                                                context.startService(svcIntent)
+                                            }
                                         }
                                     }
-                                }
-                            )
+                                )
+                            }
+                            if (!sensor.requiresWakeup) {
+                                Text(
+                                    text = "Does not support wake mode - may not work in doze mode",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
                         }
                     }
                 }

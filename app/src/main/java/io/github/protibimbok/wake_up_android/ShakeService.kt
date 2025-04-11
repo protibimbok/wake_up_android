@@ -28,6 +28,7 @@ class ShakeService : Service(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
     private lateinit var powerManager: PowerManager
     private var screenStateReceiver: BroadcastReceiver? = null
+    private var wakeLock: PowerManager.WakeLock? = null
     
     // Active sensors and their configurations
     private val activeSensors = mutableMapOf<Int, Pair<Sensor, SensorConfig>>()
@@ -110,12 +111,27 @@ class ShakeService : Service(), SensorEventListener {
         activeSensors.clear()
         sensorStates.clear()
         
-        AvailableSensors.SUPPORTED_SENSORS.forEach { config ->
-            val sensor = sensorManager.getDefaultSensor(config.type, config.requiresWakeup)
+        Settings.getSavedSensors(this).forEach { config ->
+            Log.d("ShakeService", "Adding sensor ${config.name}: ${config.enabled}")
+            if (!config.enabled) {
+                return@forEach
+            }
+            var requiresWakeup = true;
+            // First try wake-up variant
+            var sensor = sensorManager.getDefaultSensor(config.type, true)
+
+            if (sensor == null) {
+                sensor = sensorManager.getDefaultSensor(config.type, false)
+                requiresWakeup = false
+            }
+            
             if (sensor != null) {
-                activeSensors[config.type] = Pair(sensor, config)
+                val sensorConfig = config.copy(
+                    requiresWakeup = requiresWakeup,
+                )
+                activeSensors[config.type] = Pair(sensor, sensorConfig)
                 sensorStates[config.type] = SensorState()
-                Log.d("ShakeService", "Added sensor: ${config.name}")
+                Log.d("ShakeService", "Added wake sensor: ${config.name}")
             }
         }
         
@@ -129,6 +145,12 @@ class ShakeService : Service(), SensorEventListener {
         Log.d("ShakeService", "Service onDestroy")
         unregisterSensorListeners()
         screenStateReceiver?.let { unregisterReceiver(it) }
+        // Make sure wake lock is released
+        wakeLock?.let {
+            if (it.isHeld) {
+                it.release()
+            }
+        }
         super.onDestroy()
     }
 
@@ -270,10 +292,16 @@ class ShakeService : Service(), SensorEventListener {
         try {
             isListenerRegistered = false
             var anyRegistered = false
+            var needsWakeLock = false
             
             activeSensors.forEach { (type, pair) ->
                 val (sensor, config) = pair
                 if (!config.enabled) return@forEach
+                
+                // Check if we need wake lock for any enabled non-wake sensor
+                if (!config.requiresWakeup) {
+                    needsWakeLock = true
+                }
                 
                 when (type) {
                     Sensor.TYPE_SIGNIFICANT_MOTION -> {
@@ -282,10 +310,12 @@ class ShakeService : Service(), SensorEventListener {
                         }
                     }
                     else -> {
+                        // Register with wake=true only if sensor supports it
                         if (sensorManager.registerListener(
                             this,
                             sensor,
-                            SensorManager.SENSOR_DELAY_GAME
+                            SensorManager.SENSOR_DELAY_GAME,
+                            if (config.requiresWakeup) SensorManager.SENSOR_DELAY_GAME else 0
                         )) {
                             anyRegistered = true
                         }
@@ -293,8 +323,19 @@ class ShakeService : Service(), SensorEventListener {
                 }
             }
             
+            // Acquire wake lock if needed
+            if (needsWakeLock) {
+                wakeLock?.release()
+                wakeLock = powerManager.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "$packageName:SensorWakeLock"
+                ).apply {
+                    acquire(12*60*60*1000L)
+                }
+            }
+            
             isListenerRegistered = anyRegistered
-            Log.d("ShakeService", "Sensors registered: $isListenerRegistered")
+            Log.d("ShakeService", "Sensors registered: $isListenerRegistered, wakeLock: $needsWakeLock")
         } catch (e: Exception) {
             Log.e("ShakeService", "Failed to register sensors", e)
         }
@@ -313,6 +354,15 @@ class ShakeService : Service(), SensorEventListener {
                     }
                 }
             }
+            
+            // Release wake lock if held
+            wakeLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                }
+                wakeLock = null
+            }
+            
             isListenerRegistered = false
             Log.d("ShakeService", "Sensors unregistered")
         } catch (e: Exception) {
